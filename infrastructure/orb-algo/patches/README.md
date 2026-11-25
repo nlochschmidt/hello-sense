@@ -130,21 +130,32 @@ step runs in a Java 8 container against one shared local repository.
 ```bash
 docker volume create hello-m2
 
+# 0. The two private jars vendored in suripu/repo/ (dropwizard-mikkusu,
+#    suripu-jodatime), copied into the shared local repository.
+docker run --rm -v "$PWD:/src" -v hello-m2:/root/.m2 maven:3.9-eclipse-temurin-8 \
+  sh -c 'mkdir -p /root/.m2/repository && cp -R /src/suripu/repo/. /root/.m2/repository/'
+
 # 1. suripu, the libraries. Installs 0.8.0-SNAPSHOT.
 docker run --rm -v "$PWD:/src" -v hello-m2:/root/.m2 -w /src/suripu \
   maven:3.9-eclipse-temurin-8 mvn -B -DskipTests clean install
 
-# 2. suripu-app, the shaded jar.
+# 2. gaibu (github.com/hello/gaibu), against the suripu just installed.
+docker run --rm -v "$PWD:/src" -v hello-m2:/root/.m2 -w /src/gaibu \
+  maven:3.9-eclipse-temurin-8 mvn -B -DskipTests \
+    -Dsuripu.version=0.8.0-SNAPSHOT install
+
+# 3. suripu-app, the shaded jar.
 docker run --rm -v "$PWD:/src" -v hello-m2:/root/.m2 -w /src/suripu-app \
   maven:3.9-eclipse-temurin-8 mvn -B -DskipTests \
     -Dsuripu.version=0.8.0-SNAPSHOT -Dgaibu.version=1.0-SNAPSHOT \
     -Dtcnative.classifier=linux-x86_64 clean package
 ```
 
-`gaibu` (`github.com/hello/gaibu`, `mvn install`, no flags) must be in the same
-local repository first: `suripu-app` needs `is.hello.gaibu:*`, which only ever
-lived on the dead S3. So must the two private jars vendored in `suripu/repo/`
-(`dropwizard-mikkusu`, `suripu-jodatime`); copy them into the volume.
+`suripu-app` needs `is.hello.gaibu:*`, which only ever lived on the dead S3, so
+gaibu has to be built locally. It comes **after** suripu, not before: gaibu
+itself depends on `suripu-core`, pinned to a release (`0.8.5752`) that also only
+existed on the dead S3. Built first, or without the `-Dsuripu.version` override,
+it fails resolving that release.
 
 Why each flag:
 
