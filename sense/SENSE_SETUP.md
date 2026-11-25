@@ -21,28 +21,28 @@ is in [`firmware/kitsune-4513/`](firmware/kitsune-4513/).
 
 `sense_server.py` is a TLS front-end. It handles the two things only it can (the
 device's ancient TLS handshake and its antique certificate clock), then forwards every
-request untouched to Hello's own backend services, rebuilt from source and running
-under docker compose in `../../infrastructure`.
+request untouched to **orb**, the backend that replaced Hello's cloud, running under
+docker compose in [`../infrastructure`](../infrastructure/README.md).
 
 ```
    Sense --WiFi--> your DNS (*.hello.is -> your PC) --> sense_server.py (:80, :443)
                                                              |  terminates TLS, proxies
-                                    time.hello.is     ------>|--> hello-time      :1111
-                                    sense-in.hello.is ------>|--> suripu-service  :5555
-                                    messeji.hello.is  ------>|--> messeji         :10000
+                                    time.hello.is     ------>|
+                                    sense-in.hello.is ------>|--> orb  :8081
+                                    messeji.hello.is  ------>|
 ```
 
 Bodies are relayed byte-for-byte. Every request is AES-CBC signed with the device's own
-key, and the Java services verify that signature against the key in DynamoDB's
-`key_store` table, so nothing here may rewrite a payload.
+key, and orb verifies that signature against the key it holds for that Sense, so nothing
+here may rewrite a payload.
 
-Six problems had to be solved, all handled by the code here:
+Five problems had to be solved, all handled by the code here:
 
 1. **Message signing** -- every request is AES-128-CBC signed with a per-device key stored
-   on the device. You recover that key over UART, then seed it into `key_store` so the
-   backend can verify requests (`../../infrastructure/docker/seed-device.sh`).
+   on the device. You recover that key over UART, then register it with orb so the
+   backend can verify requests (step 5 below).
 2. **DNS** -- the endpoints (`sense-in.hello.is`, `messeji.hello.is`, `time.hello.is`) are
-   hardcoded in firmware, so a small DNS server redirects `*.hello.is` to your PC.
+   hardcoded in firmware, so your network has to resolve them to your PC (step 6).
 3. **TLS** -- the device speaks an ancient handshake modern TLS libraries reject. We
    terminate TLS with **tlslite-ng** (pure Python).
 4. **Cert trust + a clock bug** -- you install your own CA on the device, and the server
@@ -50,29 +50,26 @@ Six problems had to be solved, all handled by the code here:
 5. **The NTP epoch** -- the Sense expects timestamps counted from **1900**, not the Unix
    1970 epoch. Feed it Unix seconds and it sits exactly 70 years in the past (reporting
    1956), and the backend then discards every sensor sample as more than two hours out
-   of sync. `hello-time` gets this right, which is why time sync is proxied to it.
-6. **Feature flags** -- suripu gates a lot of working code behind flags held in the
-   DynamoDB `features` table, and a missing row means OFF. Nothing creates those rows:
-   `bootstrap-dynamodb.sh` makes the table and leaves it empty. The failure is quiet, a
-   `Feature <name> is null` warning and a feature that just does not happen, so run
-   `../../infrastructure/docker/seed-features.sh` after bootstrapping. Timeline feedback (the
-   times you correct by hand in the app) is the one that bites first: it saves to
-   Postgres, returns 200, and is then dropped on every subsequent read.
+   of sync. orb answers time sync on the 1900 epoch.
 
 See **[How it works](#how-it-works)** for the details.
 
 ### Running against the backend
 
-Start the stack first (see `../../infrastructure/docker`), then `make run`. Upstreams and
-behaviour are configurable by environment variable:
+Start orb first (step 0 below), then `make run`, which points all three upstreams at
+orb on `127.0.0.1:8081`. Upstreams and behaviour are configurable by environment
+variable:
 
-| Variable | Default | Purpose |
+| Variable | `make run` sets | Purpose |
 |---|---|---|
-| `SENSE_UPSTREAM_TIME` | `http://127.0.0.1:1111` | hello-time |
-| `SENSE_UPSTREAM_SENSE` | `http://127.0.0.1:5555` | suripu-service |
-| `SENSE_UPSTREAM_MESSEJI` | `http://127.0.0.1:10000` | messeji |
+| `SENSE_UPSTREAM_TIME` | `http://127.0.0.1:8081` | clock sync |
+| `SENSE_UPSTREAM_SENSE` | `http://127.0.0.1:8081` | sensor uploads |
+| `SENSE_UPSTREAM_MESSEJI` | `http://127.0.0.1:8081` | the command long-poll |
 | `SENSE_TIME_MODE` | `proxy` | set `local` to answer time sync in Python instead, for running with no backend |
 | `SENSE_AES_KEY` | -- | 32 hex chars, only needed for `SENSE_TIME_MODE=local` |
+
+Run `sense_server.py` directly without `make run` and the upstreams fall back to the
+ports of the retired Java services, which nothing listens on any more.
 
 ---
 
@@ -114,7 +111,7 @@ I/O, and 5V also silently breaks the bootloader handoff (see Troubleshooting).
 
 | Breakout pin | Adapter pin | Notes |
 |---|---|---|
-| `VBUS` | **5V** | raw USB 5V, powers the Sense |
+| `VBUS` | **5V** | raw USB 5V, powers the Sense. On boards whose jumper selects `VCCIO`, the `VCCIO` pin follows the jumper and gives only 3.3V: take 5V from the jumper header's free `5V` pin instead, and check it with a multimeter first. |
 | `GND`  | `GND` | common ground |
 | `D+`   | `TXD` | **D+/D- are swapped on this breakout. If no console output, swap D+ and D-.** |
 | `D-`   | `RXD` | |
@@ -124,26 +121,45 @@ I/O, and 5V also silently breaks the bootloader handoff (see Troubleshooting).
 
 | `ID` connected to | Mode | Use |
 |---|---|---|
-| `GND` | **debug console** -- device boots normally, 115200 8N1 | watch boot log, `connect` to WiFi |
+| `GND` | **debug console** -- 115200 8N1. The device joins WiFi but **waits at the console**: type `boot` to start sensing and uploading | watch boot log, `connect` to WiFi |
 | adapter `RTS` | **CC3200 bootloader** -- flash read/write via `cc3200tool` | `make backup`, `read-key`, `write-ca` |
 
 Power-cycle after changing the `ID` pin. (`RTS` idles high, which is what puts the CC3200
-into the bootloader; `cc3200tool` is invoked with `--sop2 '~rts'`.)
+into the bootloader; `cc3200tool` is invoked with `--sop2 '~rts'`.) Pulling the `VBUS`
+wire for a few seconds is the easiest power-cycle, because the adapter stays plugged in
+and keeps its port name.
+
+Two bootloader rules that each cost a power-cycle to learn:
+
+- **One `cc3200tool` session per power-up.** A second run fails with `Did not get ACK on
+  break condition`. Power-cycle before every `make` target that talks to the device, or
+  pass several commands to one `cc3200tool` call.
+- **Close the serial terminal first.** A `screen` session left open holds the port, and
+  `cc3200tool` fails with `Resource busy`.
+
+The "waits at the console" behaviour is the firmware's own: at power-up it checks for the
+debug cable and, when it finds one, starts only WiFi and the console. Without the cable
+(reassembled, on its normal USB power) it starts everything by itself.
 
 ### Console commands
 
-Once connected in debug mode (ID to GND), these commands are available:
+Once connected in debug mode (ID to GND), these commands are available. Backspace does
+not work from a macOS terminal; use **Ctrl-H**. The up arrow recalls the last command.
 
 | Command | Description |
 |---|---|
+| `boot` | Start sensing, clock sync and uploads (needed whenever the debug cable is attached) |
+| `status` | IP, subnet, gateway and DNS, in hex and dotted form |
+| `connect <ssid> <key> 2` | Connect to WPA2 WiFi (profile persists across reboots) |
+| `disconnect` | Delete **all** saved WiFi profiles (also resets the antenna choice to its default) |
+| `dns <hex-ip>` | Set the DNS server, e.g. `dns C0A8010A` for 192.168.1.10. **Freezes the current IP as static**; see step 6 |
 | `temp` | Read temperature |
 | `humid` | Read humidity |
 | `dust` | Read dust/particulate level |
 | `light` | Read light level |
 | `prox` | Read proximity sensor |
 | `set-time <unix_ts>` | Set device clock (bypasses network time sync) |
-| `connect <ssid> <key> 2` | Connect to WPA2 WiFi (profile persists across reboots) |
-| `factory_reset` | Factory reset the device |
+| `factory_reset` | Factory reset: deletes WiFi profiles, alarms and pill pairings |
 | `led stop` | Stop LED animation |
 | `nwp` | Network processor info |
 
@@ -168,7 +184,16 @@ matter.
 ## Step by step
 
 Set `PORT` to your adapter's serial device (find it: `ls /dev/tty.usbserial-*` on macOS,
-`/dev/ttyUSB*` on Linux).
+`/dev/ttyUSB*` on Linux). Every bootloader step needs its own power-cycle (see
+[Two modes](#two-modes-the-id-pin)).
+
+### 0. Start orb
+
+orb, its algorithm service and Postgres run under docker compose. Follow the quick start
+in [`../infrastructure/README.md`](../infrastructure/README.md): `make init`, set
+`POSTGRES_PASSWORD` in `.env`, then `make build up migrate verify`. The build needs
+Hello's `suripu-app` jar, which is not in this repository; how to rebuild it is in
+[`../infrastructure/orb-algo/patches/README.md`](../infrastructure/orb-algo/patches/README.md).
 
 ### 1. Back up the device (bootloader mode: `ID` to `RTS`, power-cycle)
 
@@ -176,15 +201,23 @@ Set `PORT` to your adapter's serial device (find it: `ls /dev/tty.usbserial-*` o
 make backup PORT=/dev/tty.usbserial-XXXX
 ```
 
-### 2. Recover the AES key (bootloader mode)
+The backup **skips the certificate files**: `cc3200tool` cannot list the names of files
+under `/cert/`, so it reports them as "file without filename" and moves on. They are
+read by name in step 2.
+
+### 2. Recover the AES key and the original CA (bootloader mode, power-cycle)
 
 ```bash
-make read-key PORT=/dev/tty.usbserial-XXXX
+mkdir -p sense_fs_backup/cert
+./venv/bin/cc3200tool -p /dev/tty.usbserial-XXXX --reset none --sop2 '~rts' \
+  read_file /cert/key.aes ./key.aes \
+  read_file /cert/ca.der sense_fs_backup/cert/ca.der
 xxd -p key.aes | tr -d '\n' > aes.key      # 32 hex chars -> ./aes.key
 ```
 
 `aes.key` is what the server signs with. (If the device has no key, it falls back to the
-firmware default `1234567891234567`; leave `aes.key` absent to use that.)
+firmware default `1234567891234567`; leave `aes.key` absent to use that.) The original
+`ca.der` is what `make restore-ca` puts back; without it, step 4 has no undo.
 
 > **Critical: use 3.3V signal levels.** At 5V the `SWITCH_2_APPS` bootloader handoff
 > silently fails. Set the FT232 jumper to 3V3 so TXD/RXD/RTS all swing 3.3V. Power
@@ -196,50 +229,111 @@ firmware default `1234567891234567`; leave `aes.key` absent to use that.)
 make gen-certs        # -> ca.crt ca.der ca.key server.crt server.key (valid 1950-2046)
 ```
 
-### 4. Install your CA on the device (bootloader mode)
+### 4. Install your CA on the device (bootloader mode, power-cycle)
 
 ```bash
 make write-ca PORT=/dev/tty.usbserial-XXXX
 ```
 
-### 5. Point the Sense's DNS at your PC
+### 5. Register the Sense with orb
 
-Either set your **router's DHCP** to hand out your PC's IP as the DNS server on the
-Sense's network, or use the firmware's `setDns` command over the debug console. Then, in
-**terminal 1**:
+orb accepts a Sense only when it knows the device's key **and** the device is paired to
+an account. The app normally does the pairing over Bluetooth; without the app, do it by
+hand.
+
+The device id is the 16 hex characters in the backup:
 
 ```bash
-make dns REDIRECT_IP=192.168.x.y      # your PC's LAN IP
+xxd -p sense_fs_backup/hello/deviceid | tr a-f A-F      # 16 hex characters
 ```
 
-### 6. Run the server (terminal 2)
+Create an account through orb's sign-up endpoint (the same one the app uses). `tz` is
+your UTC offset in milliseconds:
+
+```bash
+curl -s -X POST http://127.0.0.1:9999/v1/account -H 'Content-Type: application/json' \
+  -d '{"name":"<name>","email":"<email>","password":"<password>","tz":<utc-offset-ms>}'
+```
+
+Then, in `make psql` from `../infrastructure`, store the key, pair the Sense to the
+account and give the account its time zone (the app would send the zone too). Use the
+email in lower case; orb stores it that way.
+
+```sql
+INSERT INTO senses (device_id, aes_key)
+VALUES ('<DEVICE_ID>', decode('<contents of aes.key>', 'hex'));
+
+INSERT INTO account_senses (account_id, device_id)
+SELECT id, '<DEVICE_ID>' FROM accounts WHERE email = '<email>';
+
+INSERT INTO timezone_history (account_id, effective_from, timezone_id, offset_ms)
+SELECT id, created_at, '<zone, e.g. Europe/London>', <utc-offset-ms> FROM accounts WHERE email = '<email>';
+```
+
+Missing the pairing, orb answers every request with `401` and logs `unknown device`.
+Missing the time zone, it logs `no timezone history for account` and stores readings as
+UTC.
+
+### 6. Resolve `*.hello.is` to your PC
+
+The Sense only uses three names: `time.hello.is`, `sense-in.hello.is` and
+`messeji.hello.is`.
+
+**Recommended: local DNS records on your router**, each pointing at your PC's LAN IP. The
+Sense keeps getting its address and DNS server by DHCP, so it works on any network
+without touching the device:
+
+Most routers and DNS filters can do this; look for local DNS records, DNS rewrites,
+host overrides or domain forwarding (Pi-hole, AdGuard Home, OpenWrt, OPNsense/pfSense
+and UniFi all have one of them). A wildcard `*.hello.is` works where supported; three
+plain A records work everywhere.
+
+If the router answered `NXDOMAIN` for these names before the records existed, it caches
+that for up to 30 minutes. Keep the records permanent: `hello.is` is still a registered
+domain, so a Sense that asks public DNS reaches whoever owns it.
+
+**Alternative: DNS on your PC plus the console `dns` command.** Run `make dns
+REDIRECT_IP=192.168.x.y` in its own terminal, connect the Sense to WiFi, then on the
+console `dns C0A8xxyy` (your PC's IP in hex). This **freezes the Sense's current IP as
+static**, and no console command turns DHCP back on. The undo is a bootloader session
+that erases the stored IP configuration:
+
+```bash
+./venv/bin/cc3200tool -p /dev/tty.usbserial-XXXX --reset none --sop2 '~rts' \
+  erase_file /sys/ipcfg.ini
+```
+
+**Separate IoT network?** Allow the Sense to reach your PC on TCP 80 and 443 (and UDP 53
+if your PC answers DNS). Many routers block IoT-to-LAN traffic by default.
+
+### 7. Run the server and boot the Sense
 
 ```bash
 make run
 ```
 
-Switch the device to **debug mode** (`ID` to `GND`) and power-cycle so the app boots and
-joins WiFi. Within a minute you should see, in the `make run` output and `sense_data.jsonl`:
+Switch the device to **debug mode** (`ID` to `GND`), power-cycle, and open the console
+(`screen /dev/tty.usbserial-XXXX 115200`). The first time, join WiFi with
+`connect <ssid> <key> 2` (`2` = WPA/WPA2; the profile persists across reboots). Then type
+**`boot`**.
 
-```
-[REQ] POST /in/sense/batch (Host: sense-in.hello.is ...)
-  [BATCH] Device: ..., 1 reading(s)
-    time=..., temp=24.9C/76.8F, humidity=40.5%, light=89, dust=1543
-```
+Within a minute `make run` shows the clock request to `time.hello.is`, followed by
+uploads to `sense-in.hello.is`. orb's log (`docker compose logs -f orb` in
+`../infrastructure`) shows `time sync served` and then `ingested ... written=1` once a
+minute.
 
-### (Optional) Connect the Sense to a WPA2 network
-
-Over the debug console: `connect <ssid> <key> 2` (`2` = WPA/WPA2). The profile persists
-across reboots.
+If the Sense tried to connect before DNS worked, it may have used up its clock-sync
+retries and gone quiet. Power-cycle and `boot` again.
 
 ---
 
 ## How it works
 
 **Message signing.** Requests are `protobuf + IV(16) + AES-CBC(SHA1(body) padded to 32B)`;
-responses mirror it. The key lives at `/cert/key.aes` on the CC3200 flash. `sign_response()`
-in `sense_server.py` produces valid time-sync responses (which is what sets the device
-clock and unblocks everything else).
+responses mirror it. The key lives at `/cert/key.aes` on the CC3200 flash. orb signs its
+responses with the same key; the signed time-sync response is what sets the device clock
+and unblocks everything else. Clock sync itself travels as plain HTTP on port 80, not
+HTTPS.
 
 **UART bootloader -- the 3.3V gotcha.** `cc3200tool` can read/write the SimpleLink flash,
 but only after `SWITCH_2_APPS` hands control to the APPS bootloader. At 5V logic levels
@@ -287,7 +381,7 @@ completes, the device's clock starts at ~1956 (NTP epoch offset). The TLS handsh
 happens before the time sync response corrects the clock, so cert date validation fails
 (`sl_Connect` error **-461 = `SL_ESECDATEERROR`**) unless the cert's `notBefore` predates
 ~1956. `gen_certs.py` dates the certs from **1950**, which satisfies both the pre-sync
-clock and real time. Once hello-time responds, the clock is correct.
+clock and real time. Once orb answers the clock request, the clock is correct.
 
 ---
 
@@ -296,6 +390,13 @@ clock and real time. Once hello-time responds, the clock is correct.
 | Symptom | Cause / fix |
 |---|---|
 | `cc3200tool` times out at "Switching UART to APPS" | Signals at 5V. Set the jumper to **3.3V**. |
+| `cc3200tool`: `Did not get ACK on break condition` | The bootloader already served a session since power-up. Power-cycle. |
+| `cc3200tool`: `Resource busy` | A serial terminal (`screen`) still holds the port. Quit it (Ctrl-A, K). |
+| Console prompt, WiFi connected, but no requests ever arrive | The debug cable is attached, so the firmware waits. Type `boot`. |
+| Backspace does nothing in the console | Use Ctrl-H. |
+| orb logs `unknown device` and answers `401` | The Sense is not registered, or not paired to an account. See step 5. |
+| orb logs `no timezone history for account` | The account has no time zone. See step 5. |
+| `status` shows the right DNS but nothing reaches your PC | The Sense is on another subnet whose traffic to your PC is blocked. See step 6. |
 | No debug console output | Swap **D+ and D-** |
 | `zsh: no matches found: ~rts` | Quote it: `--sop2 '~rts'` (the Makefile already does) |
 | TLS `NO_SHARED_CIPHER` / `-340` | You're using OpenSSL, not tlslite. Use this server. |
@@ -307,32 +408,16 @@ clock and real time. Once hello-time responds, the clock is correct.
 ### Read the Sense's own logs
 
 The single most useful debugging move, and easy to miss: the Sense uploads its internal
-`LOGF`/`LOGI` output via `POST /logs`. `LogsResource` only records the device id in the
-service log — the actual text is published to the **Kinesis `logs` stream**. With the
-local stack that is localstack on `http://localhost:4566`, shard
-`shardId-000000000000`.
+`LOGF`/`LOGI` output via `POST /logs`, so you can read it without a serial cable. orb
+accepts and drops these by default. Start it with `-debug` and it prints them instead:
+set `ORB_EXTRA_FLAGS=-debug` in `../infrastructure/.env`, run `make up` there, and follow
+`docker compose logs -f orb`.
 
 This is what tells you, in the device's own words, things the proxy log cannot show:
 `signature validation fail`, `using sock 85 85`, `start recv error 0`, `NT <host><path> --
-0` / `-- 1` attempt numbers, and `status: http/1.0 200 ok`.
-
-```bash
-export AWS_ACCESS_KEY_ID=x AWS_SECRET_ACCESS_KEY=x AWS_DEFAULT_REGION=us-east-1
-IT=$(aws kinesis get-shard-iterator --stream-name logs \
-       --shard-id shardId-000000000000 --shard-iterator-type LATEST \
-       --endpoint-url http://localhost:4566 --query ShardIterator --output text)
-aws kinesis get-records --shard-iterator "$IT" --limit 20 \
-    --endpoint-url http://localhost:4566 \
-  | python3 -c 'import sys,json,base64
-for r in json.load(sys.stdin).get("Records",[]):
-    d=base64.b64decode(r["Data"])
-    print("".join(chr(c) if 32<=c<127 or c==10 else "." for c in d))'
-```
-
-Two gotchas: localstack stamps records with stale `ApproximateArrivalTimestamp` values, so
-judge recency by whether records arrive **during** your watch rather than by that field;
-and dump whole records rather than grepping for a keyword, since the mechanism usually
-shows up in the surrounding lines.
+0` / `-- 1` attempt numbers, and `status: http/1.0 200 ok`. Dump whole log uploads rather
+than grepping for a keyword, since the mechanism usually shows up in the surrounding
+lines.
 
 ---
 
@@ -341,8 +426,8 @@ shows up in the surrounding lines.
 - **Readings repeat in standalone mode.** When running with `SENSE_TIME_MODE=local`
   (no backend), the server acks `/in/sense/batch` with a plain `200`. The firmware
   wants a **signed** response and resends until it gets one, so the same reading loops
-  rather than advancing. When running against the full backend (the default `make run`
-  mode), suripu-service signs the response and this does not happen.
+  rather than advancing. When running against orb (the default `make run` mode), orb
+  signs the response and this does not happen.
 
 ---
 

@@ -18,7 +18,7 @@ These are the Python services that stand in for Hello's shut-down cloud so a
 ```bash
 make setup                          # venv + deps + cc3200tool + generated protobufs
 make gen-certs                      # local CA + server cert
-make dns  REDIRECT_IP=192.168.x.y   # terminal 1: point *.hello.is at your PC
+make dns  REDIRECT_IP=192.168.x.y   # terminal 1: point *.hello.is at your PC (or use router DNS records)
 make run                            # terminal 2: TLS front-end on :80/:443
 make help                           # all targets (device backup, AES-key recovery, CA install, ...)
 ```

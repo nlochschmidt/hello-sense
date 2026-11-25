@@ -9,8 +9,8 @@ them off.
 ## Two consoles: UART and telnet
 
 The firmware carries an interactive command console. Normally it is reached
-over **UART** (the pogo-pin serial header inside the case, see
-`sense/HARDWARE.md`). The firmware also has a **telnet server on TCP port 224**,
+over **UART** (the recessed micro-USB port inside the case, which carries serial
+rather than USB, see `sense/HARDWARE.md`). The firmware also has a **telnet server on TCP port 224**,
 but it is compiled out in production, guarded by `BUILD_SERVERS` /
 `BUILD_TELNET_SERVER` with a source comment "todo PVT disable!". The telnet
 console is far more convenient because it needs no adapter, just the LAN.
