@@ -129,7 +129,7 @@ Both variants define `PLATFORM_HAS_IMU_VDD_CONTROL` at their respective build ta
 |---|---|
 | **SEGGER J-Link** (any model supporting SWD) | J-Link EDU Mini V2 works. Must support nRF51422. |
 | **Pogo pin adapter or probe wires** | For connecting to the PCB debug pads. Spring-loaded pogo pins at 1.27mm pitch recommended. |
-| **Coin cell battery** (v1) or charged battery (v1.5) | The pill needs power during flashing. For v1, insert a fresh CR2032. |
+| **Coin cell battery** (v1) or charged battery (v1.5) | The pill needs power during flashing. For v1, insert a fresh CR2025. |
 
 ### J-Link connection settings
 

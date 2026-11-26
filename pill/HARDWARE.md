@@ -17,7 +17,7 @@ one is the most common cause of bricking.**
 |---|---|---|
 | **SEGGER J-Link** (SWD debug probe) | Read/write the nRF51422 flash over SWD | J-Link EDU Mini V2 |
 | **1.27mm pogo pin adapter** or probe wires | Contact the pill's debug pads without soldering | Spring-loaded pogo pins at 1.27mm pitch |
-| Coin cell battery (CR2032) | Powers the v1 pill during SWD operations | Any CR2032 |
+| Coin cell battery (CR2025) | Powers the v1 pill during SWD operations | Any CR2025 (a thicker CR2032 does not fit) |
 
 ## The two variants
 
@@ -29,7 +29,7 @@ Incompatible GPIO pin mappings, so the wrong firmware bricks the pill. See
 - Board: `905-00007-05` / `-A`
 - MCU: Nordic nRF51422-QFAA
 - IMU: ST LIS2DH12 (SPI)
-- Battery: removable CR2032 coin cell
+- Battery: removable CR2025 coin cell
 - Debug header: **6 holes** (2x3 @ 1.27mm pitch, active-low reed switch on P0.30)
 - Build target: `pill+pill_PVT1`
 - Last compiling firmware tag: **1.2.1**
