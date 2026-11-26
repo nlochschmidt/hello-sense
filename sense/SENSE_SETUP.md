@@ -40,9 +40,9 @@ Five problems had to be solved, all handled by the code here:
 
 1. **Message signing** -- every request is AES-128-CBC signed with a per-device key stored
    on the device. You recover that key over UART, then register it with orb so the
-   backend can verify requests (step 5 below).
+   backend can verify requests (step 4 below).
 2. **DNS** -- the endpoints (`sense-in.hello.is`, `messeji.hello.is`, `time.hello.is`) are
-   hardcoded in firmware, so your network has to resolve them to your PC (step 6).
+   hardcoded in firmware, so your network has to resolve them to your PC (step 5).
 3. **TLS** -- the device speaks an ancient handshake modern TLS libraries reject. We
    terminate TLS with **tlslite-ng** (pure Python).
 4. **Cert trust + a clock bug** -- you install your own CA on the device, and the server
@@ -122,7 +122,7 @@ I/O, and 5V also silently breaks the bootloader handoff (see Troubleshooting).
 | `ID` connected to | Mode | Use |
 |---|---|---|
 | `GND` | **debug console** -- 115200 8N1. The device joins WiFi but **waits at the console**: type `boot` to start sensing and uploading | watch boot log, `connect` to WiFi |
-| adapter `RTS` | **CC3200 bootloader** -- flash read/write via `cc3200tool` | `make backup`, `read-key`, `write-ca` |
+| adapter `RTS` | **CC3200 bootloader** -- flash read/write via `cc3200tool` | `make backup`, `write-ca`, `restore-ca`, `dhcp` |
 
 Power-cycle after changing the `ID` pin. (`RTS` idles high, which is what puts the CC3200
 into the bootloader; `cc3200tool` is invoked with `--sop2 '~rts'`.) Pulling the `VBUS`
@@ -155,7 +155,7 @@ not work from a macOS terminal; use **Ctrl-H**. The up arrow recalls the last co
 | `status` | IP, subnet, gateway and DNS, in hex and dotted form |
 | `connect <ssid> <key> 2` | Connect to WPA2 WiFi (profile persists across reboots) |
 | `disconnect` | Delete **all** saved WiFi profiles (also resets the antenna choice to its default) |
-| `dns <hex-ip>` | Set the DNS server, e.g. `dns C0A8010A` for 192.168.1.10. **Freezes the current IP as static**; see step 6 |
+| `dns <hex-ip>` | Set the DNS server, e.g. `dns C0A8010A` for 192.168.1.10. **Freezes the current IP as static**; see step 5 |
 | `temp` | Read temperature |
 | `humid` | Read humidity |
 | `dust` | Read dust/particulate level |
@@ -198,86 +198,59 @@ in [`../infrastructure/README.md`](../infrastructure/README.md): `make init`, se
 Hello's `suripu-app` jar, which is not in this repository; how to rebuild it is in
 [`../infrastructure/orb-algo/patches/README.md`](../infrastructure/orb-algo/patches/README.md).
 
-### 1. Back up the device (bootloader mode: `ID` to `RTS`, power-cycle)
+### 1. Back up the device and its key (bootloader mode: `ID` to `RTS`, power-cycle)
 
 ```bash
 make backup PORT=/dev/tty.usbserial-XXXX
 ```
 
-The backup **skips the certificate files**: `cc3200tool` cannot list the names of files
-under `/cert/`, so it reports them as "file without filename" and moves on. They are
-read by name in step 2.
-
-### 2. Recover the AES key and the original CA (bootloader mode, power-cycle)
-
-```bash
-mkdir -p sense_fs_backup/cert
-./venv/bin/cc3200tool -p /dev/tty.usbserial-XXXX --reset none --sop2 '~rts' \
-  read_file /cert/key.aes ./key.aes \
-  read_file /cert/ca.der sense_fs_backup/cert/ca.der
-xxd -p key.aes | tr -d '\n' > aes.key      # 32 hex chars -> ./aes.key
-```
-
-`aes.key` is what the server signs with. (If the device has no key, it falls back to the
-firmware default `1234567891234567`; leave `aes.key` absent to use that.) The original
-`ca.der` is what `make restore-ca` puts back; without it, step 4 has no undo.
+This copies the device's whole filesystem to `sense_fs_backup/`, including the original
+CA in `cert/ca.der` that `make restore-ca` puts back, and writes the device's AES key to
+`aes.key`, the 32 hex characters orb verifies every request with. It stops with `backup
+incomplete` if any of that is missing. (If the device has no key, it falls back to the
+firmware default `1234567891234567`.)
 
 > **Critical: use 3.3V signal levels.** At 5V the `SWITCH_2_APPS` bootloader handoff
 > silently fails. Set the FT232 jumper to 3V3 so TXD/RXD/RTS all swing 3.3V. Power
 > the Sense's VBUS from the board's separate 5V pin (USB VBUS), not VCCIO.
 
-### 3. Generate certificates
+### 2. Generate certificates
 
 ```bash
 make gen-certs        # -> ca.crt ca.der ca.key server.crt server.key (valid 1950-2046)
 ```
 
-### 4. Install your CA on the device (bootloader mode, power-cycle)
+### 3. Install your CA on the device (bootloader mode, power-cycle)
 
 ```bash
 make write-ca PORT=/dev/tty.usbserial-XXXX
 ```
 
-### 5. Register the Sense with orb
+### 4. Register the Sense with orb
 
 orb accepts a Sense only when it knows the device's key **and** the device is paired to
-an account. The app normally does the pairing over Bluetooth; without the app, do it by
-hand.
-
-The device id is the 16 hex characters in the backup:
-
-```bash
-xxd -p sense_fs_backup/hello/deviceid | tr a-f A-F      # 16 hex characters
-```
-
-Create an account through orb's sign-up endpoint (the same one the app uses). `tz` is
-your UTC offset in milliseconds:
+an account. The app normally does the pairing over Bluetooth; without the app, create an
+account through orb's sign-up endpoint (the same one the app uses; `tz` is your UTC
+offset in milliseconds):
 
 ```bash
 curl -s -X POST http://127.0.0.1:9999/v1/account -H 'Content-Type: application/json' \
   -d '{"name":"<name>","email":"<email>","password":"<password>","tz":<utc-offset-ms>}'
 ```
 
-Then, in `make psql` from `../infrastructure`, store the key, pair the Sense to the
-account and give the account its time zone (the app would send the zone too). Use the
-email in lower case; orb stores it that way.
+then pair the Sense from the backup to it, with your time zone (the app would send the
+zone too):
 
-```sql
-INSERT INTO senses (device_id, aes_key)
-VALUES ('<DEVICE_ID>', decode('<contents of aes.key>', 'hex'));
-
-INSERT INTO account_senses (account_id, device_id)
-SELECT id, '<DEVICE_ID>' FROM accounts WHERE email = '<email>';
-
-INSERT INTO timezone_history (account_id, effective_from, timezone_id, offset_ms)
-SELECT id, created_at, '<zone, e.g. Europe/London>', <utc-offset-ms> FROM accounts WHERE email = '<email>';
+```bash
+make register EMAIL=<email> ZONE=<zone, e.g. Europe/London>
 ```
 
-Missing the pairing, orb answers every request with `401` and logs `unknown device`.
-Missing the time zone, it logs `no timezone history for account` and stores readings as
-UTC.
+It is safe to re-run, and refuses without changing anything when the account or zone is
+unknown or the account already holds another Sense. Missing the pairing, orb answers
+every request with `401` and logs `unknown device`. Missing the zone, it logs `no timezone
+history for account` and stores readings as UTC.
 
-### 6. Resolve `*.hello.is` to your PC
+### 5. Resolve `*.hello.is` to your PC
 
 The Sense only uses three names: `time.hello.is`, `sense-in.hello.is` and
 `messeji.hello.is`.
@@ -299,17 +272,12 @@ domain, so a Sense that asks public DNS reaches whoever owns it.
 REDIRECT_IP=192.168.x.y` in its own terminal, connect the Sense to WiFi, then on the
 console `dns C0A8xxyy` (your PC's IP in hex). This **freezes the Sense's current IP as
 static**, and no console command turns DHCP back on. The undo is a bootloader session
-that erases the stored IP configuration:
-
-```bash
-./venv/bin/cc3200tool -p /dev/tty.usbserial-XXXX --reset none --sop2 '~rts' \
-  erase_file /sys/ipcfg.ini
-```
+that erases the stored IP configuration: `make dhcp PORT=/dev/tty.usbserial-XXXX`.
 
 **Separate IoT network?** Allow the Sense to reach your PC on TCP 80 and 443 (and UDP 53
 if your PC answers DNS). Many routers block IoT-to-LAN traffic by default.
 
-### 7. Run the server and boot the Sense
+### 6. Run the server and boot the Sense
 
 ```bash
 make run
@@ -398,9 +366,9 @@ clock and real time. Once orb answers the clock request, the clock is correct.
 | Console prompt, WiFi connected, but no requests ever arrive | The debug cable is attached, so the firmware waits. Type `boot`. |
 | Reassembled, the ring keeps spinning yellow and nothing uploads | It is powered from a computer's USB port, which looks like a debug cable. Use a plain USB wall charger. |
 | Backspace does nothing in the console | Use Ctrl-H. |
-| orb logs `unknown device` and answers `401` | The Sense is not registered, or not paired to an account. See step 5. |
-| orb logs `no timezone history for account` | The account has no time zone. See step 5. |
-| `status` shows the right DNS but nothing reaches your PC | The Sense is on another subnet whose traffic to your PC is blocked. See step 6. |
+| orb logs `unknown device` and answers `401` | The Sense is not registered, or not paired to an account. See step 4. |
+| orb logs `no timezone history for account` | The account has no time zone. See step 4. |
+| `status` shows the right DNS but nothing reaches your PC | The Sense is on another subnet whose traffic to your PC is blocked. See step 5. |
 | No debug console output | Swap **D+ and D-** |
 | `zsh: no matches found: ~rts` | Quote it: `--sop2 '~rts'` (the Makefile already does) |
 | TLS `NO_SHARED_CIPHER` / `-340` | You're using OpenSSL, not tlslite. Use this server. |
