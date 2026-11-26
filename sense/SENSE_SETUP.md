@@ -137,9 +137,12 @@ Two bootloader rules that each cost a power-cycle to learn:
 - **Close the serial terminal first.** A `screen` session left open holds the port, and
   `cc3200tool` fails with `Resource busy`.
 
-The "waits at the console" behaviour is the firmware's own: at power-up it checks for the
-debug cable and, when it finds one, starts only WiFi and the console. Without the cable
-(reassembled, on its normal USB power) it starts everything by itself.
+The "waits at the console" behaviour is the firmware's own: at power-up it drives the
+UART's TX line low and checks whether RX follows. A plain USB wall charger ties the two
+USB data lines (which carry TX and RX) together, so RX follows and the Sense starts
+everything by itself, dark until you wave at it. Anything else (the debug cable, **a
+computer's USB port**, a charge-only cable) reads as a debug cable: the ring spins yellow
+and the Sense waits at the console. Once reassembled, run it from a wall charger.
 
 ### Console commands
 
@@ -393,6 +396,7 @@ clock and real time. Once orb answers the clock request, the clock is correct.
 | `cc3200tool`: `Did not get ACK on break condition` | The bootloader already served a session since power-up. Power-cycle. |
 | `cc3200tool`: `Resource busy` | A serial terminal (`screen`) still holds the port. Quit it (Ctrl-A, K). |
 | Console prompt, WiFi connected, but no requests ever arrive | The debug cable is attached, so the firmware waits. Type `boot`. |
+| Reassembled, the ring keeps spinning yellow and nothing uploads | It is powered from a computer's USB port, which looks like a debug cable. Use a plain USB wall charger. |
 | Backspace does nothing in the console | Use Ctrl-H. |
 | orb logs `unknown device` and answers `401` | The Sense is not registered, or not paired to an account. See step 5. |
 | orb logs `no timezone history for account` | The account has no time zone. See step 5. |
